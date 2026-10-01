@@ -1,0 +1,21 @@
+# Local builds, screenshots, photo metadata and audit reports
+/build/
+/artifacts/
+.DS_Store
+__pycache__/
+*.py[cod]
+
+# Local credentials and editor/agent state
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+.aws/
+.codex/
+.agents/
+.idea/
+.vscode/
+*.xcuserstate
+xcuserdata/

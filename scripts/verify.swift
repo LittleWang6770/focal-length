@@ -29,6 +29,15 @@ import UniformTypeIdentifiers
         try check(ratingFixture.filter { PhotoScope.rating(0).includes(rating:$0) } == [0,0],"Unrated is an explicit scope, not all photos")
         try check(ratingFixture.filter { PhotoScope(id:"").includes(rating:$0) } == ratingFixture,"All photos must retain every rating")
         try check(PhotoScope(id:"★★★★★") == .album("★★★★★"),"Star-named albums must not be reinterpreted")
+        for stars in 1...5 {
+            let title = String(repeating:"★",count:stars)
+            try check(PhotoScope.albumTitle(title,hasPhotos:false,systemRatings:true) == nil,"Empty legacy star albums must not duplicate system rating entries")
+            try check(PhotoScope.albumTitle(title,hasPhotos:true,systemRatings:true) == "普通相簿 · \(title)","Populated legacy albums must remain accessible with a distinct label")
+            try check(PhotoScope.albumTitle(title,hasPhotos:false,systemRatings:false) != nil,"Old systems must retain legacy albums")
+        }
+        try check(PhotoScope.albumTitle(" ★ ★ ★ ★ ★ ",hasPhotos:false,systemRatings:true) == nil,"Whitespace must not leave ambiguous star entries")
+        try check(PhotoScope.albumTitle("旅行★★★★★",hasPhotos:false,systemRatings:true) == "旅行★★★★★","Do not hide ordinary named albums")
+        try check(PhotoScope.albumTitle("旅行",hasPhotos:false,systemRatings:true) == "旅行","Keep unrelated empty albums")
         try check(PhotoScope(id:"album-local-id") == .album("album-local-id"),"Existing album identifiers remain unchanged")
         try check(PhotoScope.ratingChoices(supported:false).isEmpty,"Old systems must not offer unsupported star scopes")
         let ratingChoices = PhotoScope.ratingChoices(supported:true)
@@ -69,6 +78,10 @@ import UniformTypeIdentifiers
         try check(dataRecord.lens == "SONY FE 35mm F1.4 GM" && dataRecord.equivalent == 35,"PhotoKit data path metadata parsing")
 
         let model = AppModel(restore:false)
+        try check(model.allowNetwork,"iCloud download must default to enabled")
+        model.allowNetwork = false; model.source = 1; model.sourceChanged()
+        try check(!model.allowNetwork,"Keep an explicit opt-out when switching source")
+        model.source = 0; model.sourceChanged()
         model.report = recursive
         try check(model.lensRows.reduce(0) { $0+$1.count } == 7,"Lens totals reconcile including unknown")
         try check(model.focalRows.first?.name == "24 mm" && model.focalRows.first?.count == 2,"Standard grouping and ties")

@@ -26,9 +26,8 @@ struct StatRow: Identifiable {
     @Published var equivalent = true
     @Published var standard = true
     @Published var selectedLens: String?
-    @Published var advanced = false
     @Published var allFocals = false
-    @Published var allowNetwork = false
+    @Published var allowNetwork = true
     @Published var demo = false
     @Published var folderURL: URL?
     @Published var report = ScanReport()

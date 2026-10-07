@@ -52,7 +52,7 @@ struct MainView: View {
                     Button("最小窗口 · 980 × 700") { resize(width:980,height:700) }
                     Button("默认窗口 · 1180 × 830") { resize(width:1180,height:830) }
                     Divider()
-                    Button("关于统计口径") { model.notice = "标准焦段按比例距离归类，超出 14–600 mm 的值保留原值；精确模式按 1 mm 分组。\n\n等效焦距只采用照片中明确记录的数值。缺失时可切换实际焦距查看。\n\n占比以成功读取的照片数为分母，无 EXIF 的照片仍计入总数。Live Photo 只统计静态照片，视频不计入；文件夹中的多份导出副本分别计数。\n\nApple 相册统计当前系统照片图库及所选相簿；可通过更多设置允许从 iCloud 下载原件。" }
+                    Button("关于统计口径") { model.notice = "标准焦段按比例距离归类，超出 14–600 mm 的值保留原值；精确模式按 1 mm 分组。\n\n等效焦距只采用照片中明确记录的数值。缺失时可切换实际焦距查看。\n\n占比以成功读取的照片数为分母，无 EXIF 的照片仍计入总数。Live Photo 只统计静态照片，视频不计入；文件夹中的多份导出副本分别计数。\n\nApple 相册统计当前系统照片图库及所选范围；默认允许从 iCloud 下载原件，可在照片来源中关闭。" }
                 }.fixedSize().menuStyle(.borderlessButton).disabled(model.isRunning || model.connecting)
             }
         }.padding(.horizontal,30).padding(.top,16).padding(.bottom,24)
@@ -87,11 +87,13 @@ struct MainView: View {
                 if case .rating = PhotoScope(id:model.selectedAlbumID) {
                     Text("按系统星级筛选整个图库，仅统计照片。")
                         .font(.system(size:12)).foregroundStyle(Theme.secondary)
-                } else if !model.demo && PhotoScope.supportsRatings {
-                    Text("系统星级请选“5 星照片”等范围；同名相簿独立统计。")
-                        .font(.system(size:12)).foregroundStyle(Theme.secondary)
                 }
-                Text(model.allowNetwork ? "将按需从 iCloud 下载原件" : "仅统计本机可读取的照片").font(.system(size:12)).foregroundStyle(Theme.secondary)
+            }
+            if model.source == 1 {
+                Toggle("允许从 iCloud 下载原件",isOn:$model.allowNetwork)
+                Text(model.allowNetwork ? "云端原件会按需下载，可能需要较多时间和流量。" : "仅统计本机可读取的照片。")
+                    .font(.system(size:11)).foregroundStyle(Theme.secondary)
+                    .fixedSize(horizontal:false,vertical:true)
             }
         }.disabled(model.isRunning || model.connecting)
     }
@@ -115,21 +117,13 @@ struct MainView: View {
             }.pickerStyle(.segmented).labelsHidden()
             Text(model.standard ? "相近焦距归为一组，如 49、51 → 50 mm。" : "按 1 mm 四舍五入，保留变焦使用细节。")
                 .font(.system(size:12)).foregroundStyle(Theme.secondary).fixedSize(horizontal:false,vertical:true)
-            DisclosureGroup("更多设置",isExpanded:$model.advanced) {
-                VStack(alignment:.leading,spacing:12) {
-                    Picker("焦距口径",selection:$model.equivalent) {
-                        Text("全画幅等效").tag(true); Text("实际焦距").tag(false)
-                    }
-                    Toggle("显示全部焦段",isOn:$model.allFocals)
-                    if model.source == 1 {
-                        Toggle("允许从 iCloud 下载原件",isOn:$model.allowNetwork)
-                        Text("开启后可能需要较多时间和网络流量。")
-                            .font(.system(size:11)).foregroundStyle(Theme.secondary)
-                    }
-                    Text("JPG / JPEG · PNG · HEIC / HEIF\nLive Photo 只统计静态照片。")
-                        .font(.system(size:11)).foregroundStyle(Theme.secondary)
-                }.padding(.top,10)
-            }.font(.system(size:12))
+            Divider()
+            Picker("焦距口径",selection:$model.equivalent) {
+                Text("全画幅等效").tag(true); Text("实际焦距").tag(false)
+            }
+            Toggle("显示全部焦段",isOn:$model.allFocals)
+            Text("JPG / JPEG · PNG · HEIC / HEIF\nLive Photo 只统计静态照片。")
+                .font(.system(size:11)).foregroundStyle(Theme.secondary)
         }.disabled(model.isRunning)
     }
     var actions: some View {

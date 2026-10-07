@@ -19,8 +19,8 @@ cat > "$TASK_APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>焦段统计</string>
 <key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleVersion</key><string>3</string>
-<key>CFBundleShortVersionString</key><string>0.3.0</string>
+<key>CFBundleVersion</key><string>4</string>
+<key>CFBundleShortVersionString</key><string>0.3.1</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSPhotoLibraryUsageDescription</key><string>读取照片的焦距和镜头信息，生成使用统计。不会修改或删除照片。</string>

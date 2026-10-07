@@ -138,6 +138,17 @@ enum PhotoScope: Equatable {
             AlbumChoice(id:PhotoScope.rating(value).id,title:value == 0 ? "未评级照片 · 整个图库" : "\(value) 星照片 · 整个图库")
         }
     }
+    static func isStarAlbumTitle(_ title:String) -> Bool {
+        let compact = title.filter { !$0.isWhitespace }
+        return (1...5).contains(compact.count) && compact.allSatisfy { $0 == "★" }
+    }
+    static func albumTitle(_ title:String,hasPhotos:Bool,systemRatings:Bool) -> String? {
+        guard isStarAlbumTitle(title) else { return title }
+        // Suppress empty legacy rating albums only when the real system rating
+        // scopes are available. Keep populated albums accessible and unambiguous.
+        if systemRatings && !hasPhotos { return nil }
+        return "普通相簿 · \(title)"
+    }
     func includes(rating:Int) -> Bool {
         if case .rating(let selected) = self { return rating == selected }
         return true
@@ -206,7 +217,17 @@ enum ScanEngine {
         var result: [AlbumChoice] = []
         let albums = PHAssetCollection.fetchAssetCollections(with:.album,subtype:.any,options:nil)
         albums.enumerateObjects { album,_,_ in
-            result.append(AlbumChoice(id:album.localIdentifier,title:album.localizedTitle ?? "未命名相簿"))
+            let title = album.localizedTitle ?? "未命名相簿"
+            var hasPhotos = true
+            if PhotoScope.supportsRatings && PhotoScope.isStarAlbumTitle(title) {
+                let options = PHFetchOptions()
+                options.predicate = NSPredicate(format:"mediaType == %d",PHAssetMediaType.image.rawValue)
+                options.fetchLimit = 1
+                hasPhotos = PHAsset.fetchAssets(in:album,options:options).count > 0
+            }
+            if let title = PhotoScope.albumTitle(title,hasPhotos:hasPhotos,systemRatings:PhotoScope.supportsRatings) {
+                result.append(AlbumChoice(id:album.localIdentifier,title:title))
+            }
         }
         return [AlbumChoice(id:"",title:"所有照片")]
             + PhotoScope.ratingChoices(supported:PhotoScope.supportsRatings)

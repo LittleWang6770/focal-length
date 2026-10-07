@@ -81,9 +81,16 @@ struct MainView: View {
             Button(model.source == 0 ? (model.demo ? "选择示例文件夹…" : "选择文件夹…") : (model.demo ? "连接示例图库…" : "连接照片图库…")) { model.selectSource() }
                 .buttonStyle(ActionStyle())
             if model.source == 1 && model.chosen {
-                Picker("相簿",selection:$model.selectedAlbumID) {
+                Picker("照片范围",selection:$model.selectedAlbumID) {
                     ForEach(model.albums) { Text($0.title).tag($0.id) }
                 }.onChange(of:model.selectedAlbumID) { _ in model.reset() }
+                if case .rating = PhotoScope(id:model.selectedAlbumID) {
+                    Text("按系统星级筛选整个图库，仅统计照片。")
+                        .font(.system(size:12)).foregroundStyle(Theme.secondary)
+                } else if !model.demo && PhotoScope.supportsRatings {
+                    Text("系统星级请选“5 星照片”等范围；同名相簿独立统计。")
+                        .font(.system(size:12)).foregroundStyle(Theme.secondary)
+                }
                 Text(model.allowNetwork ? "将按需从 iCloud 下载原件" : "仅统计本机可读取的照片").font(.system(size:12)).foregroundStyle(Theme.secondary)
             }
         }.disabled(model.isRunning || model.connecting)
@@ -98,7 +105,7 @@ struct MainView: View {
                 }.pickerStyle(.radioGroup).labelsHidden()
                     .onChange(of:model.recursive) { _ in model.scopeChanged() }
             } else {
-                Text("按相簿中的照片统计，Live Photo 计为一张。")
+                Text("按所选范围统计，Live Photo 计为一张。")
                     .foregroundStyle(Theme.secondary).font(.system(size:12))
             }
             Divider()

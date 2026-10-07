@@ -243,7 +243,7 @@ struct StatRow: Identifiable {
     }
     func exportCSV() -> String {
         var lines: [[String]] = [["数据来源",demo ? "合成示例数据" : sourceName],
-            ["扫描范围",source == 0 ? (recursive ? "包含所有子文件夹" : "当前文件夹") : "所选相簿"],
+            ["扫描范围",source == 0 ? (recursive ? "包含所有子文件夹" : "当前文件夹") : sourceName],
             ["镜头筛选",selectedLens ?? "全部镜头"],["分组",standard ? "标准焦段" : "1 mm 四舍五入"],
             ["类型","名称","数量","分母","占比"]]
         for row in focalRows { lines.append([equivalent ? "等效焦段" : "实际焦距",row.name,String(row.count),String(filtered.count),percent(row.count)]) }

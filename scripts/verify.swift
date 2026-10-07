@@ -22,6 +22,18 @@ import UniformTypeIdentifiers
         try check(CGImageDestinationFinalize(destination),"Fixture encoding failed: \(url.lastPathComponent)")
     }
     @MainActor static func main() async throws {
+        // Star ratings are library properties, not album names or EXIF values.
+        let fiveStars = PhotoScope(id:PhotoScope.rating(5).id)
+        let ratingFixture = [0,1,2,3,4,5,5,0]
+        try check(ratingFixture.filter { fiveStars.includes(rating:$0) } == [5,5],"Five stars must exclude unrated and lower-rated assets")
+        try check(ratingFixture.filter { PhotoScope.rating(0).includes(rating:$0) } == [0,0],"Unrated is an explicit scope, not all photos")
+        try check(ratingFixture.filter { PhotoScope(id:"").includes(rating:$0) } == ratingFixture,"All photos must retain every rating")
+        try check(PhotoScope(id:"★★★★★") == .album("★★★★★"),"Star-named albums must not be reinterpreted")
+        try check(PhotoScope(id:"album-local-id") == .album("album-local-id"),"Existing album identifiers remain unchanged")
+        try check(PhotoScope.ratingChoices(supported:false).isEmpty,"Old systems must not offer unsupported star scopes")
+        let ratingChoices = PhotoScope.ratingChoices(supported:true)
+        try check(Set(ratingChoices.map(\.id)).count == 6 && ratingChoices.first?.id == fiveStars.id,"Rating scopes have stable unique identities")
+        try check(PhotoScope(id:"focal-statistics:rating:99") == .album("focal-statistics:rating:99"),"Invalid scope must not silently fetch the whole library")
         let base = URL(fileURLWithPath:FileManager.default.currentDirectoryPath).appendingPathComponent("build/fixtures")
         let root = base.appendingPathComponent(UUID().uuidString)
         let nested = root.appendingPathComponent("nested")
@@ -73,6 +85,12 @@ import UniformTypeIdentifiers
         try check(MetadataReader.positive(Double.nan) == nil && MetadataReader.positive(-1) == nil && MetadataReader.positive(true) == nil,"Invalid metadata rejected")
         try check(AppModel.csvField("=cmd,\"test\"") == "\"'=cmd,\"\"test\"\"\"","CSV escaping and formula protection")
         try check(model.exportCSV().contains("镜头筛选"),"CSV filter context")
+        model.source = 1; model.albums = ratingChoices; model.selectedAlbumID = fiveStars.id
+        try check(model.sourceName == "5 星照片 · 整个图库","Dashboard must identify star scope")
+        try check(model.exportCSV().contains("5 星照片 · 整个图库"),"CSV must preserve selected star scope")
+        model.reset()
+        try check(model.selectedAlbumID == fiveStars.id && model.base.isEmpty,"Reset results without losing the star selection")
+        model.source = 0; model.selectedAlbumID = ""
 
         let empty = base.appendingPathComponent("empty")
         try FileManager.default.createDirectory(at:empty,withIntermediateDirectories:true)
@@ -93,7 +111,7 @@ import UniformTypeIdentifiers
         try check(!model.hasResults && model.progress < 1,"Failure must not claim success")
         model.exitDemo()
         try check(!model.demo && model.base.isEmpty,"No synthetic records leak into real results")
-        print("PASS: JPEG/PNG/HEIC, metadata, current/recursive, symlinks/packages, Live Photo file pair, failures, counts, grouping, cancellation, CSV, demo isolation")
+        print("PASS: rating scopes and album identity, rating CSV context, JPEG/PNG/HEIC, metadata, current/recursive, symlinks/packages, Live Photo file pair, failures, counts, grouping, cancellation, CSV, demo isolation")
         print("Synthetic fixture folder: \(root.path)")
     }
 }

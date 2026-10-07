@@ -38,7 +38,7 @@ struct ScanProgress: Sendable {
 }
 
 enum ScanFailure: LocalizedError {
-    case unreadable(String), unsupported, photoAccess, missingAlbum, tooLarge
+    case unreadable(String), unsupported, photoAccess, missingAlbum, tooLarge, ratingUnavailable
     var errorDescription: String? {
         switch self {
         case .unreadable(let name): return "无法读取：\(name)"
@@ -46,6 +46,7 @@ enum ScanFailure: LocalizedError {
         case .photoAccess: return "未获得照片图库访问权限，请在系统设置中允许访问。"
         case .missingAlbum: return "这个相簿已不存在，请重新选择。"
         case .tooLarge: return "单张照片资源超过 256 MB，已跳过。"
+        case .ratingUnavailable: return "系统星级筛选需要 macOS 27 或更新版本。请重新选择照片范围。"
         }
     }
 }
@@ -109,6 +110,40 @@ struct AlbumChoice: Identifiable, Sendable {
     let title: String
 }
 
+// App-owned scopes are distinct from PhotoKit collection identifiers and titles.
+// An album named ★★★★★ remains an album; it is never interpreted as a rating.
+enum PhotoScope: Equatable {
+    case all, rating(Int), album(String)
+    static let ratingPrefix = "focal-statistics:rating:"
+    init(id:String) {
+        if id.isEmpty { self = .all }
+        else if id.hasPrefix(Self.ratingPrefix), let rating = Int(id.dropFirst(Self.ratingPrefix.count)), (0...5).contains(rating) {
+            self = .rating(rating)
+        } else { self = .album(id) }
+    }
+    var id: String {
+        switch self {
+        case .all: return ""
+        case .rating(let value): return Self.ratingPrefix + String(value)
+        case .album(let id): return id
+        }
+    }
+    static var supportsRatings: Bool {
+        if #available(macOS 27, *) { return true }
+        return false
+    }
+    static func ratingChoices(supported:Bool) -> [AlbumChoice] {
+        guard supported else { return [] }
+        return ([5,4,3,2,1,0]).map { value in
+            AlbumChoice(id:PhotoScope.rating(value).id,title:value == 0 ? "未评级照片 · 整个图库" : "\(value) 星照片 · 整个图库")
+        }
+    }
+    func includes(rating:Int) -> Bool {
+        if case .rating(let selected) = self { return rating == selected }
+        return true
+    }
+}
+
 enum ScanEngine {
     typealias Update = @Sendable (ScanProgress) async -> Void
 
@@ -168,35 +203,57 @@ enum ScanEngine {
 
     static func albums() async throws -> [AlbumChoice] {
         guard authorized else { throw ScanFailure.photoAccess }
-        var result = [AlbumChoice(id:"",title:"所有照片")]
+        var result: [AlbumChoice] = []
         let albums = PHAssetCollection.fetchAssetCollections(with:.album,subtype:.any,options:nil)
         albums.enumerateObjects { album,_,_ in
             result.append(AlbumChoice(id:album.localIdentifier,title:album.localizedTitle ?? "未命名相簿"))
         }
-        return [result[0]] + result.dropFirst().sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
+        return [AlbumChoice(id:"",title:"所有照片")]
+            + PhotoScope.ratingChoices(supported:PhotoScope.supportsRatings)
+            + result.sorted { $0.title.localizedStandardCompare($1.title) == .orderedAscending }
     }
     static var authorized: Bool {
         let status = PHPhotoLibrary.authorizationStatus(for:.readWrite)
         return status == .authorized || status == .limited
     }
-    static func photos(albumID: String, network: Bool, update: @escaping Update) async throws -> ScanReport {
+    static func photoAssets(albumID:String, update:@escaping Update) async throws -> [PHAsset] {
         guard authorized else { throw ScanFailure.photoAccess }
-        await update(ScanProgress(completed:0,total:0,name:"正在读取相簿",discovering:true))
+        let scope = PhotoScope(id:albumID)
+        if case .rating = scope, !PhotoScope.supportsRatings { throw ScanFailure.ratingUnavailable }
+        await update(ScanProgress(completed:0,total:0,name:"正在筛选照片",discovering:true))
         let options = PHFetchOptions()
         options.predicate = NSPredicate(format:"mediaType == %d",PHAssetMediaType.image.rawValue)
         let assets: PHFetchResult<PHAsset>
-        if albumID.isEmpty { assets = PHAsset.fetchAssets(with:options) }
-        else {
-            guard let album = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers:[albumID],options:nil).firstObject else { throw ScanFailure.missingAlbum }
+        switch scope {
+        case .all, .rating: assets = PHAsset.fetchAssets(with:options)
+        case .album(let id):
+            guard let album = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers:[id],options:nil).firstObject else { throw ScanFailure.missingAlbum }
             assets = PHAsset.fetchAssets(in:album,options:options)
         }
-        var report = ScanReport()
+        var selected: [PHAsset] = []
         var seen = Set<String>()
-        await update(ScanProgress(completed:0,total:assets.count,name:"读取照片信息"))
         for index in 0..<assets.count {
             try Task.checkCancellation()
             let asset = assets.object(at:index)
             guard seen.insert(asset.localIdentifier).inserted else { continue }
+            if case .rating = scope {
+                // Read the public library rating, not EXIF/XMP or favorites. Filtering
+                // the property avoids relying on unsupported fetch predicate keys.
+                if #available(macOS 27, *) {
+                    guard scope.includes(rating:asset.rating.rawValue) else { continue }
+                } else { throw ScanFailure.ratingUnavailable }
+            }
+            selected.append(asset)
+        }
+        try Task.checkCancellation()
+        return selected
+    }
+    static func photos(albumID: String, network: Bool, update: @escaping Update) async throws -> ScanReport {
+        let assets = try await photoAssets(albumID:albumID,update:update)
+        var report = ScanReport()
+        await update(ScanProgress(completed:0,total:assets.count,name:"读取照片信息"))
+        for (index,asset) in assets.enumerated() {
+            try Task.checkCancellation()
             report.attempted += 1
             let resources = PHAssetResource.assetResources(for:asset)
             // A Live Photo's pairedVideo is never read. Prefer original static resources.

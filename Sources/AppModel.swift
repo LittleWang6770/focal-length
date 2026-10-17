@@ -29,7 +29,9 @@ struct StatRow: Identifiable {
     @Published var allFocals = false
     @Published var allowNetwork = true
     @Published var demo = false
-    @Published var folderURL: URL?
+    @Published var folders: [FolderSource] = []
+    @Published var selectedFolderIDs = Set<UUID>()
+    @Published private var demoFolders: [FolderSource] = []
     @Published var report = ScanReport()
     @Published var currentFile = ""
     @Published var completed = 0
@@ -41,17 +43,19 @@ struct StatRow: Identifiable {
     private var generation = UUID()
     private var readingStarted: Double?
     private var lastAdvance = 0.0
+    private let defaults: UserDefaults
 
     static let anchors: [Double] = [14,16,20,24,28,35,40,50,70,85,105,135,200,300,400,600]
     static let zoom = "FE 24–70mm F2.8 GM II"
     static let prime = "FE 35mm F1.4 GM"
     static let portrait = "FE 85mm F1.4 GM"
     static let unknown = "未识别镜头"
-    init(restore:Bool = true) {
+    init(restore:Bool = true,defaults:UserDefaults = .standard) {
+        self.defaults = defaults
         guard restore else { return }
-        do { folderURL = try FolderAccess.restore(); chosen = folderURL != nil }
+        do { folders = try FolderAccess.restore(defaults:defaults); chosen = !folders.isEmpty }
         catch { errorMessage = "上次的文件夹访问已失效，请重新选择。" }
-        if let saved = UserDefaults.standard.object(forKey:"recursive") as? Bool { recursive = saved }
+        if let saved = defaults.object(forKey:"recursive") as? Bool { recursive = saved }
     }
     static let samples: [PhotoRecord] = {
         var values: [PhotoRecord] = []
@@ -77,8 +81,16 @@ struct StatRow: Identifiable {
     var lensCount: Int { Set(filtered.compactMap(\.lens)).count }
     var hasResults: Bool { phase == .complete }
     var isRunning: Bool { phase == .running }
-    var folderPath: String { demo ? "/示例/摄影归档/2026/旅行照片" : (folderURL?.path ?? "选择后将记住访问权限") }
-    var folderName: String { demo ? "旅行照片" : (folderURL?.lastPathComponent ?? "选择一个照片文件夹") }
+    var folderRows: [FolderSource] { demo ? demoFolders : folders }
+    var folderPath: String { folderRows.map { $0.url.path }.joined(separator:"\n") }
+    var folderName: String {
+        if folderRows.isEmpty { return "尚未添加文件夹" }
+        return folderRows.count == 1 ? folderRows[0].url.lastPathComponent : "\(folderRows.count) 个文件夹"
+    }
+    static var sampleFolders: [FolderSource] {
+        [FolderSource(url:URL(fileURLWithPath:"/示例/本机磁盘/旅行照片")),
+         FolderSource(url:URL(fileURLWithPath:"/示例/外置磁盘/人像照片"))]
+    }
     var sourceName: String {
         let name = source == 0 ? folderName : (albums.first { $0.id == selectedAlbumID }?.title ?? "所有照片")
         return name + (demo ? " · 示例数据" : "")
@@ -114,34 +126,55 @@ struct StatRow: Identifiable {
     }
     func sourceChanged() {
         reset()
+        selectedFolderIDs = []
         if demo {
             albums = [AlbumChoice(id:"",title:"所有照片"),AlbumChoice(id:"demo-album",title:"周末散步")]
             chosen = false; return
         }
-        chosen = source == 0 && folderURL != nil
+        chosen = source == 0 && !folders.isEmpty
         if source == 1 && ScanEngine.authorized { connectPhotos() }
     }
     func scopeChanged() {
         reset()
-        if !demo { UserDefaults.standard.set(recursive,forKey:"recursive") }
+        if !demo { defaults.set(recursive,forKey:"recursive") }
     }
     func selectSource() {
-        if demo { reset(); chosen = true; return }
+        if demo { reset(); if source == 0 { demoFolders = Self.sampleFolders }; chosen = true; return }
         if source == 1 { connectPhotos(); return }
         let panel = NSOpenPanel()
-        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false
-        panel.title = "选择需要统计的照片文件夹"; panel.prompt = "选择文件夹"; panel.directoryURL = folderURL
+        panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = true
+        panel.title = "添加需要统计的照片文件夹"; panel.prompt = "添加文件夹"; panel.directoryURL = folders.last?.url
         panel.begin { [weak self] result in
-            guard result == .OK, let url = panel.url else { return }
-            self?.useFolder(url)
+            guard result == .OK else { return }
+            self?.addFolders(panel.urls)
         }
     }
-    func useFolder(_ url:URL,persist:Bool = true) {
-        reset(); demo = false; source = 0; folderURL = url; chosen = true
-        if persist {
-            do { try FolderAccess.save(url) }
-            catch { notice = "这个文件夹可以用于本次统计，但访问权限未能保存。下次可能需要重新选择。\n\(error.localizedDescription)" }
+    func addFolders(_ urls:[URL],persist:Bool = true) {
+        guard !urls.isEmpty, !isRunning else { return }
+        reset(); demo = false; source = 0; selectedFolderIDs = []
+        for url in urls {
+            let added = persist ? FolderAccess.make(url) : FolderSource(url:url)
+            if let index = folders.firstIndex(where:{ FolderAccess.identity($0.url) == FolderAccess.identity(url) }) {
+                // Re-adding refreshes an expired permission without duplicating the row.
+                folders[index] = FolderSource(url:added.url,id:folders[index].id,bookmark:added.bookmark,accessIssue:added.accessIssue)
+            } else { folders.append(added) }
         }
+        chosen = !folders.isEmpty
+        if persist { saveFolders() }
+        if folders.contains(where:{ $0.bookmark == nil && $0.accessIssue != nil }) {
+            notice = "部分文件夹的权限未能保存；本次仍可统计，下次使用时请重新添加。"
+        }
+    }
+    func removeSelectedFolders(persist:Bool = true) {
+        guard !isRunning, !selectedFolderIDs.isEmpty else { return }
+        reset()
+        if demo { demoFolders.removeAll { selectedFolderIDs.contains($0.id) } }
+        else { folders.removeAll { selectedFolderIDs.contains($0.id) }; if persist { saveFolders() } }
+        selectedFolderIDs = []; chosen = !folderRows.isEmpty
+    }
+    private func saveFolders() {
+        do { try FolderAccess.save(folders,defaults:defaults) }
+        catch { notice = "文件夹列表未能保存，下次启动时请重新添加。\n\(error.localizedDescription)" }
     }
     func connectPhotos() {
         connecting = true
@@ -167,6 +200,7 @@ struct StatRow: Identifiable {
     }
     func show(_ newPhase:Phase) {
         reset(); demo = true
+        selectedFolderIDs = []; demoFolders = newPhase == .empty ? [] : Self.sampleFolders
         albums = [AlbumChoice(id:"",title:"所有照片"),AlbumChoice(id:"demo-album",title:"周末散步")]
         chosen = newPhase != .empty
         if newPhase == .running { start(); return }
@@ -197,13 +231,19 @@ struct StatRow: Identifiable {
                     }
                     result = ScanReport(records:records,attempted:records.count)
                 } else if self.source == 0 {
-                    guard let folder = self.folderURL else { throw ScanFailure.unreadable("请重新选择文件夹") }
-                    result = try await ScanEngine.folder(folder,recursive:self.recursive) { [weak self] update in await self?.accept(update,token:token) }
+                    self.folders = self.folders.map(FolderAccess.refresh)
+                    self.saveFolders()
+                    result = try await ScanEngine.folders(self.folders.map(\.url),recursive:self.recursive) { [weak self] update in await self?.accept(update,token:token) }
                 } else {
                     result = try await ScanEngine.photos(albumID:self.selectedAlbumID,network:self.allowNetwork) { [weak self] update in await self?.accept(update,token:token) }
                 }
                 try Task.checkCancellation()
                 guard generation == token else { return }
+                if self.source == 0 && !self.demo {
+                    for index in self.folders.indices where result.unavailableFolders.contains(self.folders[index].url.path) {
+                        self.folders[index].accessIssue = "无法访问，请连接磁盘；权限失效时请重新添加。"
+                    }
+                }
                 report = result; phase = .complete; progress = 1; remaining = "已完成"; clockTask?.cancel()
             } catch is CancellationError { /* stop/reset owns the terminal state */ }
             catch {
@@ -244,7 +284,9 @@ struct StatRow: Identifiable {
         var lines: [[String]] = [["数据来源",demo ? "合成示例数据" : sourceName],
             ["扫描范围",source == 0 ? (recursive ? "包含所有子文件夹" : "当前文件夹") : sourceName],
             ["镜头筛选",selectedLens ?? "全部镜头"],["分组",standard ? "标准焦段" : "1 mm 四舍五入"],
-            ["类型","名称","数量","分母","占比"]]
+        ]
+        if source == 0 { for folder in folderRows { lines.append(["来源文件夹",folder.url.path]) } }
+        lines.append(["类型","名称","数量","分母","占比"])
         for row in focalRows { lines.append([equivalent ? "等效焦段" : "实际焦距",row.name,String(row.count),String(filtered.count),percent(row.count)]) }
         lines.append(["焦段","缺少焦段",String(filtered.count-valid),String(filtered.count),percent(filtered.count-valid)])
         for row in lensRows { lines.append(["镜头",row.name,String(row.count),String(base.count),percent(row.count,total:base.count)]) }

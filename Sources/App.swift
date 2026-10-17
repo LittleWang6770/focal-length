@@ -64,22 +64,19 @@ struct MainView: View {
                 Text("本地文件夹").tag(0); Text("Apple 相册").tag(1)
             }.pickerStyle(.segmented).labelsHidden()
                 .onChange(of:model.source) { _ in model.sourceChanged() }
-            VStack(alignment:.leading,spacing:8) {
-                Label(model.source == 0 ? model.folderName : "Apple 相册",systemImage:model.source == 0 ? "folder" : "photo.on.rectangle")
-                    .font(.system(size:13,weight:.medium))
-                    .lineLimit(1).truncationMode(.middle)
-                if model.source == 0 {
-                    Text(model.folderPath)
-                        .font(.system(size:12)).foregroundStyle(Theme.secondary)
+            if model.source == 0 {
+                folderList
+            } else {
+                VStack(alignment:.leading,spacing:8) {
+                    Label("Apple 相册",systemImage:"photo.on.rectangle")
+                        .font(.system(size:13,weight:.medium))
                         .lineLimit(1).truncationMode(.middle)
-                        .help(model.folderPath)
-                } else {
                     Text(model.connecting ? "正在连接照片图库…" : model.chosen ? (model.demo ? "已载入示例图库" : "已连接系统照片图库") : "首次使用时允许访问照片图库")
                         .font(.system(size:12)).foregroundStyle(Theme.secondary)
                 }
+                Button(model.demo ? "连接示例图库…" : "连接照片图库…") { model.selectSource() }
+                    .buttonStyle(ActionStyle())
             }
-            Button(model.source == 0 ? (model.demo ? "选择示例文件夹…" : "选择文件夹…") : (model.demo ? "连接示例图库…" : "连接照片图库…")) { model.selectSource() }
-                .buttonStyle(ActionStyle())
             if model.source == 1 && model.chosen {
                 Picker("照片范围",selection:$model.selectedAlbumID) {
                     ForEach(model.albums) { Text($0.title).tag($0.id) }
@@ -96,6 +93,58 @@ struct MainView: View {
                     .fixedSize(horizontal:false,vertical:true)
             }
         }.disabled(model.isRunning || model.connecting)
+    }
+    var folderList: some View {
+        VStack(alignment:.leading,spacing:10) {
+            HStack {
+                Text(model.folderName).font(.system(size:12,weight:.medium))
+                    .lineLimit(1).truncationMode(.middle)
+                Spacer(minLength:4)
+                if !model.folderRows.isEmpty {
+                    Button(model.selectedFolderIDs.count == model.folderRows.count ? "取消全选" : "全选") {
+                        model.selectedFolderIDs = model.selectedFolderIDs.count == model.folderRows.count ? [] : Set(model.folderRows.map(\.id))
+                    }.buttonStyle(.link).font(.system(size:11))
+                }
+            }
+            if model.folderRows.isEmpty {
+                Text("可添加本机与外置磁盘中的多个文件夹。")
+                    .font(.system(size:12)).foregroundStyle(Theme.secondary)
+                    .fixedSize(horizontal:false,vertical:true)
+            } else {
+                ScrollView {
+                    VStack(alignment:.leading,spacing:8) {
+                        ForEach(model.folderRows) { folder in
+                            Toggle(isOn:Binding(get:{ model.selectedFolderIDs.contains(folder.id) },set:{ selected in
+                                if selected { model.selectedFolderIDs.insert(folder.id) }
+                                else { model.selectedFolderIDs.remove(folder.id) }
+                            })) {
+                                VStack(alignment:.leading,spacing:3) {
+                                    Label(folder.url.lastPathComponent,systemImage:"folder")
+                                        .font(.system(size:12,weight:.medium))
+                                    Text(folder.url.path).font(.system(size:11)).foregroundStyle(Theme.secondary)
+                                    if folder.accessIssue != nil {
+                                        Label("需连接磁盘或重新授权",systemImage:"exclamationmark.circle")
+                                            .font(.system(size:10)).foregroundStyle(Theme.secondary)
+                                    }
+                                }.lineLimit(1).truncationMode(.middle)
+                                    .frame(maxWidth:.infinity,alignment:.leading)
+                            }.toggleStyle(.checkbox)
+                                .accessibilityLabel("选择文件夹 \(folder.url.lastPathComponent)")
+                                .help(folder.url.path + (folder.accessIssue.map { "\n" + $0 } ?? ""))
+                        }
+                    }.padding(2)
+                }.frame(height:min(164,CGFloat(model.folderRows.count)*62))
+            }
+            HStack(spacing:8) {
+                Button { model.selectSource() } label: { Label("添加…",systemImage:"plus") }
+                Button { model.removeSelectedFolders() } label: { Label("移除所选",systemImage:"minus") }
+                    .disabled(model.selectedFolderIDs.isEmpty)
+                    .help("仅移除列表中的路径，不会删除磁盘上的照片。")
+            }.buttonStyle(.bordered).controlSize(.small)
+            Text("勾选后可批量移除；统计会包含列表中的全部文件夹。")
+                .font(.system(size:11)).foregroundStyle(Theme.secondary)
+                .fixedSize(horizontal:false,vertical:true)
+        }
     }
     var optionsCard: some View {
         Card {
@@ -187,6 +236,7 @@ struct MainView: View {
                     Text("使用概览").font(.system(size:19,weight:.semibold))
                     Text(model.sourceName + (model.source == 0 ? (model.recursive ? " / 含子文件夹" : " / 仅当前层") : ""))
                         .font(.system(size:12)).foregroundStyle(Theme.secondary).lineLimit(1).truncationMode(.middle)
+                        .help(model.source == 0 ? model.folderPath : model.sourceName)
                 }
                 Spacer()
                 Button { export() } label: { Label("导出 CSV",systemImage:"square.and.arrow.up") }
@@ -198,7 +248,7 @@ struct MainView: View {
             }
             if model.report.failed + model.report.cloud + model.report.unsupported + model.report.inaccessibleDirectories > 0 {
                 Card {
-                    Text("另有 \(model.report.failed) 张读取失败 · \(model.report.cloud) 张 iCloud 待下载 · \(model.report.unsupported) 张格式不支持")
+                    Text("另有 \(model.report.failed) 张读取失败 · \(model.report.cloud) 张 iCloud 待下载 · \(model.report.unsupported) 张格式不支持 · \(model.report.inaccessibleDirectories) 个目录或条目无法访问")
                         .font(.system(size:12)).fixedSize(horizontal:false,vertical:true)
                     HStack {
                         Button("查看未分析原因") { model.showIssues() }.buttonStyle(.link)

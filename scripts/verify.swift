@@ -4,8 +4,8 @@ import CoreGraphics
 import UniformTypeIdentifiers
 
 @main struct Verification {
-    static func check(_ condition: @autoclosure () -> Bool, _ message:String) throws {
-        if !condition() { throw NSError(domain:"Verification",code:1,userInfo:[NSLocalizedDescriptionKey:message]) }
+    static func check(_ condition: @autoclosure () throws -> Bool, _ message:String) throws {
+        if try condition() == false { throw NSError(domain:"Verification",code:1,userInfo:[NSLocalizedDescriptionKey:message]) }
     }
     static func photo(_ url:URL, type:UTType = .jpeg, focal:Double? = nil, equivalent:Int? = nil, lens:String? = nil) throws {
         let context = CGContext(data:nil,width:64,height:64,bitsPerComponent:8,bytesPerRow:0,space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.noneSkipLast.rawValue)!
@@ -70,6 +70,57 @@ import UniformTypeIdentifiers
         let recursive = try await ScanEngine.folder(root,recursive:true) { _ in }
         try check(recursive.records.count == 7,"Recursive scan must include one nested image and exclude symlinks/packages: \(recursive.records.count)")
         try check(recursive.failed == 1 && recursive.attempted == 8,"Recursive counts")
+        let second = base.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:second,withIntermediateDirectories:true)
+        try photo(second.appendingPathComponent("second-85.jpg"),focal:85,equivalent:85,lens:"85mm F1.8")
+        let missing = base.appendingPathComponent("offline-disk-\(UUID().uuidString)")
+        let combined = try await ScanEngine.folders([root,nested,second,root],recursive:true) { _ in }
+        try check(combined.records.count == 8 && combined.attempted == 9 && combined.failed == 1,"Overlapping and repeated roots must count each photo/corrupt file once")
+        try check(Set(combined.records.map(\.id)).count == 8,"Merged records must have unique paths")
+        let combinedShallow = try await ScanEngine.folders([root,nested,second],recursive:false) { _ in }
+        try check(combinedShallow.records.count == 8,"Current-level mode must apply to every selected root")
+        let partial = try await ScanEngine.folders([missing,root,second],recursive:true) { _ in }
+        try check(partial.records.count == 8 && partial.unavailableFolders == [missing.path] && partial.inaccessibleDirectories == 1,"An offline root must not discard other sources")
+        do { _ = try await ScanEngine.folders([missing],recursive:true) { _ in }; throw ScanFailure.unreadable("All-offline scan unexpectedly succeeded") }
+        catch { try check(!(error is ScanFailure),"All-offline scan must fail instead of reporting a successful zero") }
+        do { _ = try await ScanEngine.folders([],recursive:true) { _ in }; throw CancellationError() }
+        catch { try check(error is ScanFailure,"Empty source list must fail explicitly") }
+
+        let suite = "FocalLengthVerification.\(UUID().uuidString)"
+        let preferences = UserDefaults(suiteName:suite)!
+        defer { preferences.removePersistentDomain(forName:suite) }
+        let savedSources = [FolderAccess.make(root),FolderAccess.make(second)]
+        try check(savedSources.allSatisfy { $0.bookmark != nil },"Both roots must receive independent read-only bookmarks")
+        try FolderAccess.save(savedSources,defaults:preferences)
+        let restored = try FolderAccess.restore(defaults:preferences)
+        try check(restored.map(\.id) == savedSources.map(\.id) && restored.map { $0.url.path } == savedSources.map { $0.url.path },"Folder list, order and stable identifiers must survive restoration")
+        let relaunched = AppModel(defaults:preferences)
+        try check(relaunched.chosen && relaunched.folders.map(\.id) == savedSources.map(\.id),"Relaunch must restore every root and enable scanning")
+        let invalid = FolderSource(url:missing,bookmark:Data("invalid bookmark".utf8))
+        try FolderAccess.save([savedSources[0],invalid],defaults:preferences)
+        let degraded = try FolderAccess.restore(defaults:preferences)
+        try check(degraded.count == 2 && degraded[0].accessIssue == nil && degraded[1].url.path == missing.path && degraded[1].accessIssue != nil,"One broken/offline bookmark must retain its path and not lose other sources")
+        try FolderAccess.save([],defaults:preferences)
+        try check(try FolderAccess.restore(defaults:preferences).isEmpty,"Removing all roots must persist an empty list")
+        preferences.removeObject(forKey:FolderAccess.listKey)
+        preferences.set(try FolderAccess.bookmark(root),forKey:FolderAccess.key)
+        let migrated = try FolderAccess.restore(defaults:preferences)
+        try check(migrated.count == 1 && migrated[0].url.path == root.path && preferences.data(forKey:FolderAccess.listKey) != nil && preferences.data(forKey:FolderAccess.key) == nil,"Migrate the previous single-folder bookmark")
+        let folderModel = AppModel(restore:false,defaults:preferences)
+        folderModel.addFolders([root,second,root],persist:false)
+        try check(folderModel.folders.count == 2 && folderModel.chosen,"Adding multiple folders is additive and deduplicates paths")
+        folderModel.report = combined; folderModel.phase = .complete
+        try check(folderModel.exportCSV().contains(root.path) && folderModel.exportCSV().contains(second.path),"CSV must identify every selected root")
+        let originalFiles = Set(try FileManager.default.contentsOfDirectory(atPath:root.path))
+        folderModel.selectedFolderIDs = Set(folderModel.folders.map(\.id))
+        folderModel.removeSelectedFolders(persist:true)
+        try check(folderModel.folders.isEmpty && !folderModel.chosen && folderModel.base.isEmpty,"Batch removal clears stale results and disables scanning")
+        try check(Set(try FileManager.default.contentsOfDirectory(atPath:root.path)) == originalFiles,"Removing sources must never modify source files")
+        try check(try FolderAccess.restore(defaults:preferences).isEmpty,"Removed paths must not return on relaunch")
+        folderModel.addFolders([root,second],persist:false)
+        folderModel.selectedFolderIDs = [folderModel.folders[0].id]
+        folderModel.removeSelectedFolders(persist:false)
+        try check(folderModel.folders.count == 1 && folderModel.folders[0].url == second,"Removing a single source keeps the others")
         try check(recursive.records.filter { $0.equivalent != nil }.count == 5,"Equivalent focal coverage must exclude missing EXIF and actual-only image")
         try check(recursive.records.filter { $0.actual != nil }.count == 6,"Actual focal coverage")
         try check(recursive.records.first { $0.id.hasSuffix("actual-only.jpg") }?.equivalent == nil,"Never infer equivalent from physical focal")
@@ -77,7 +128,7 @@ import UniformTypeIdentifiers
         let dataRecord = try MetadataReader.read(data:Data(contentsOf:root.appendingPathComponent("prime-35.jpg")),id:"photo-asset")
         try check(dataRecord.lens == "SONY FE 35mm F1.4 GM" && dataRecord.equivalent == 35,"PhotoKit data path metadata parsing")
 
-        let model = AppModel(restore:false)
+        let model = AppModel(restore:false,defaults:preferences)
         try check(model.allowNetwork,"iCloud download must default to enabled")
         model.allowNetwork = false; model.source = 1; model.sourceChanged()
         try check(!model.allowNetwork,"Keep an explicit opt-out when switching source")
@@ -111,7 +162,7 @@ import UniformTypeIdentifiers
         try check(emptyReport.records.isEmpty && emptyReport.failed == 0,"Empty directory success")
         do { _ = try await ScanEngine.folder(base.appendingPathComponent("missing"),recursive:true) { _ in }; throw ScanFailure.unreadable("Missing directory unexpectedly succeeded") }
         catch { try check(!(error is ScanFailure),"Nonexistent source must fail with filesystem error") }
-        let cancelled = Task { try await ScanEngine.folder(root,recursive:true) { _ in } }
+        let cancelled = Task { try await ScanEngine.folders([root,second],recursive:true) { _ in } }
         cancelled.cancel()
         do { _ = try await cancelled.value; throw ScanFailure.unreadable("Cancellation ignored") }
         catch { try check(error is CancellationError,"Cancelled scan must not return a completed report") }
@@ -124,7 +175,7 @@ import UniformTypeIdentifiers
         try check(!model.hasResults && model.progress < 1,"Failure must not claim success")
         model.exitDemo()
         try check(!model.demo && model.base.isEmpty,"No synthetic records leak into real results")
-        print("PASS: rating scopes and album identity, rating CSV context, JPEG/PNG/HEIC, metadata, current/recursive, symlinks/packages, Live Photo file pair, failures, counts, grouping, cancellation, CSV, demo isolation")
+        print("PASS: multiple roots, overlap deduplication, offline roots, bookmark restoration/migration, additive selection, batch removal, source CSV, ratings, JPEG/PNG/HEIC, metadata, current/recursive, symlinks/packages, Live Photo file pair, failures, counts, grouping, cancellation, demo isolation")
         print("Synthetic fixture folder: \(root.path)")
     }
 }

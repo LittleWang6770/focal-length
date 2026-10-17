@@ -23,6 +23,7 @@ struct ScanReport: Sendable {
     var unsupported = 0
     var failed = 0
     var inaccessibleDirectories = 0
+    var unavailableFolders: [String] = []
     // Keep a bounded diagnostic sample even for a very large damaged folder.
     var issues: [ScanIssue] = []
     mutating func issue(_ name: String, _ reason: String) {
@@ -159,37 +160,69 @@ enum ScanEngine {
     typealias Update = @Sendable (ScanProgress) async -> Void
 
     static func folder(_ root: URL, recursive: Bool, update: @escaping Update) async throws -> ScanReport {
-        let scoped = root.startAccessingSecurityScopedResource()
-        defer { if scoped { root.stopAccessingSecurityScopedResource() } }
-        let rootValues = try root.resourceValues(forKeys:[.isDirectoryKey,.isReadableKey])
-        guard rootValues.isDirectory == true, rootValues.isReadable != false else { throw ScanFailure.unreadable(root.path) }
-        // Force an access check; an empty successful enumeration is different from a denied root.
-        _ = try FileManager.default.contentsOfDirectory(at:root,includingPropertiesForKeys:nil,options:[.skipsHiddenFiles])
+        try await folders([root],recursive:recursive,update:update)
+    }
+    static func folders(_ roots:[URL],recursive:Bool,update:@escaping Update) async throws -> ScanReport {
+        guard !roots.isEmpty else { throw ScanFailure.unreadable("请至少添加一个照片文件夹") }
+        var scoped: [URL] = []
+        defer { for url in scoped { url.stopAccessingSecurityScopedResource() } }
         var report = ScanReport()
+        var files: [URL] = []
+        var seen = Set<String>()
+        var validRoots = 0
+        var firstError: Error?
         let keys: [URLResourceKey] = [.isRegularFileKey,.isSymbolicLinkKey,.isDirectoryKey,.isPackageKey]
         var options: FileManager.DirectoryEnumerationOptions = [.skipsHiddenFiles,.skipsPackageDescendants]
         if !recursive { options.insert(.skipsSubdirectoryDescendants) }
-        guard let enumerator = FileManager.default.enumerator(at:root,includingPropertiesForKeys:keys,options:options,errorHandler:{ url,error in
-            report.inaccessibleDirectories += 1
-            report.issue(url.path,error.localizedDescription)
-            return true
-        }) else { throw ScanFailure.unreadable(root.path) }
-        var files: [URL] = []
-        var visited = 0
-        await update(ScanProgress(completed:0,total:0,name:root.lastPathComponent,discovering:true))
-        while let url = enumerator.nextObject() as? URL {
+        for root in roots {
             try Task.checkCancellation()
-            visited += 1
+            if root.startAccessingSecurityScopedResource() { scoped.append(root) }
+            await update(ScanProgress(completed:0,total:files.count,name:root.lastPathComponent,discovering:true))
             do {
-                let values = try url.resourceValues(forKeys:Set(keys))
-                if values.isSymbolicLink == true || values.isPackage == true { enumerator.skipDescendants(); continue }
-                if values.isRegularFile == true && MetadataReader.extensions.contains(url.pathExtension.lowercased()) { files.append(url) }
+                let values = try root.resourceValues(forKeys:[.isDirectoryKey,.isReadableKey])
+                guard values.isDirectory == true, values.isReadable != false else { throw ScanFailure.unreadable(root.path) }
+                // Distinguish a denied/offline root from a successfully empty folder.
+                _ = try FileManager.default.contentsOfDirectory(at:root,includingPropertiesForKeys:nil,options:[.skipsHiddenFiles])
+                validRoots += 1
             } catch {
+                firstError = firstError ?? error
+                report.inaccessibleDirectories += 1
+                report.unavailableFolders.append(root.path)
+                report.issue(root.path,error.localizedDescription)
+                continue
+            }
+            guard let enumerator = FileManager.default.enumerator(at:root,includingPropertiesForKeys:keys,options:options,errorHandler:{ url,error in
                 report.inaccessibleDirectories += 1
                 report.issue(url.path,error.localizedDescription)
+                return true
+            }) else {
+                let error = ScanFailure.unreadable(root.path)
+                firstError = firstError ?? error
+                validRoots -= 1
+                report.inaccessibleDirectories += 1
+                report.unavailableFolders.append(root.path)
+                report.issue(root.path,error.localizedDescription)
+                continue
             }
-            if visited % 256 == 0 { await update(ScanProgress(completed:0,total:files.count,name:url.lastPathComponent,discovering:true)) }
+            var visited = 0
+            while let url = enumerator.nextObject() as? URL {
+                try Task.checkCancellation()
+                visited += 1
+                do {
+                    let values = try url.resourceValues(forKeys:Set(keys))
+                    if values.isSymbolicLink == true || values.isPackage == true { enumerator.skipDescendants(); continue }
+                    if values.isRegularFile == true && MetadataReader.extensions.contains(url.pathExtension.lowercased()) {
+                        let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+                        if seen.insert(path).inserted { files.append(url) }
+                    }
+                } catch {
+                    report.inaccessibleDirectories += 1
+                    report.issue(url.path,error.localizedDescription)
+                }
+                if visited % 256 == 0 { await update(ScanProgress(completed:0,total:files.count,name:url.lastPathComponent,discovering:true)) }
+            }
         }
+        guard validRoots > 0 else { throw firstError ?? ScanFailure.unreadable("所有照片文件夹均无法访问") }
         files.sort { $0.path.localizedStandardCompare($1.path) == .orderedAscending }
         await update(ScanProgress(completed:0,total:files.count,name:"读取照片信息"))
         var lastUpdate = ProcessInfo.processInfo.systemUptime
